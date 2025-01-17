@@ -50,13 +50,17 @@ ipcRenderer.on('clipboard-updated', (event, data) => {
 
 // 监听连接状态更新
 ipcRenderer.on('connection-status', (event, status) => {
+    // 更新状态文本
     statusDiv.textContent = status
     
     // 更新状态样式
     statusDiv.className = 'status'
     if (status.includes('已连接')) {
         statusDiv.classList.add('connected')
-    } else if (status.includes('断开')) {
+    } else if (status.includes('断开') || status.includes('错误')) {
         statusDiv.classList.add('disconnected')
     }
-}) 
+})
+
+// 请求初始连接状态
+ipcRenderer.send('get-connection-status') 

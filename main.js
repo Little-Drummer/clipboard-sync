@@ -6,9 +6,14 @@ const dgram = require('dgram')
 
 // 设置控制台编码
 if (process.platform === 'win32') {
-    // 使用chcp命令设置控制台代码页
+    process.env.LANG = 'zh_CN.UTF-8'
+    process.env.CHCP = '65001'
+    
+    // 使用 PowerShell 命令设置代码页
     const { execSync } = require('child_process')
     try {
+        execSync('powershell -command "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8"', { stdio: 'ignore' })
+        execSync('powershell -command "$OutputEncoding = [System.Text.Encoding]::UTF8"', { stdio: 'ignore' })
         execSync('chcp 65001', { stdio: 'ignore' })
     } catch (error) {
         // 忽略错误
@@ -24,11 +29,11 @@ function log(message, ...args) {
     if (process.platform === 'win32' && args.length > 0) {
         const argsStr = args.map(arg => {
             if (typeof arg === 'object') {
-                return JSON.stringify(arg)
+                return JSON.stringify(arg, null, 2)
             }
             return String(arg)
         }).join(' ')
-        console.log(logMessage + ' ' + argsStr)
+        process.stdout.write(Buffer.from(logMessage + ' ' + argsStr + '\n', 'utf8'))
     } else {
         console.log(logMessage, ...args)
     }
@@ -44,11 +49,11 @@ function logError(message, ...args) {
                 return arg.message
             }
             if (typeof arg === 'object') {
-                return JSON.stringify(arg)
+                return JSON.stringify(arg, null, 2)
             }
             return String(arg)
         }).join(' ')
-        console.error(errorMessage + ' ' + argsStr)
+        process.stderr.write(Buffer.from(errorMessage + ' ' + argsStr + '\n', 'utf8'))
     } else {
         console.error(errorMessage, ...args)
     }
@@ -401,5 +406,14 @@ app.on('before-quit', () => {
 app.on('window-all-closed', () => {
     if (process.platform !== 'darwin') {
         app.quit()
+    }
+})
+
+// 添加连接状态处理
+ipcMain.on('get-connection-status', (event) => {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+        event.reply('connection-status', `已连接到Mac服务器`)
+    } else {
+        event.reply('connection-status', '等待连接...')
     }
 })
