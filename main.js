@@ -6,40 +6,52 @@ const dgram = require('dgram')
 
 // 设置控制台编码
 if (process.platform === 'win32') {
-    process.env.LANG = 'zh_CN.UTF-8'
-    // 使用 iconv-lite 来处理编码
-    const iconv = require('iconv-lite')
-    const originalStdoutWrite = process.stdout.write
-    const originalStderrWrite = process.stderr.write
-
-    process.stdout.write = function (chunk, encoding, callback) {
-        return originalStdoutWrite.call(
-            process.stdout,
-            iconv.encode(chunk, 'utf8'),
-            encoding,
-            callback
-        )
-    }
-
-    process.stderr.write = function (chunk, encoding, callback) {
-        return originalStderrWrite.call(
-            process.stderr,
-            iconv.encode(chunk, 'utf8'),
-            encoding,
-            callback
-        )
+    // 使用chcp命令设置控制台代码页
+    const { execSync } = require('child_process')
+    try {
+        execSync('chcp 65001', { stdio: 'ignore' })
+    } catch (error) {
+        // 忽略错误
     }
 }
 
 // 创建日志函数
 function log(message, ...args) {
     const timestamp = new Date().toLocaleTimeString()
-    console.log(`[${timestamp}] ${message}`, ...args)
+    const logMessage = `[${timestamp}] ${message}`
+    
+    // 在Windows上特殊处理args的显示
+    if (process.platform === 'win32' && args.length > 0) {
+        const argsStr = args.map(arg => {
+            if (typeof arg === 'object') {
+                return JSON.stringify(arg)
+            }
+            return String(arg)
+        }).join(' ')
+        console.log(logMessage + ' ' + argsStr)
+    } else {
+        console.log(logMessage, ...args)
+    }
 }
 
 function logError(message, ...args) {
     const timestamp = new Date().toLocaleTimeString()
-    console.error(`[${timestamp}] 错误: ${message}`, ...args)
+    const errorMessage = `[${timestamp}] 错误: ${message}`
+    
+    if (process.platform === 'win32' && args.length > 0) {
+        const argsStr = args.map(arg => {
+            if (arg instanceof Error) {
+                return arg.message
+            }
+            if (typeof arg === 'object') {
+                return JSON.stringify(arg)
+            }
+            return String(arg)
+        }).join(' ')
+        console.error(errorMessage + ' ' + argsStr)
+    } else {
+        console.error(errorMessage, ...args)
+    }
 }
 
 let mainWindow = null
@@ -84,16 +96,21 @@ function setupDiscoveryService() {
                 const localIP = getLocalIPAddress()
                 log('发送响应IP:', localIP, '到:', rinfo.address)
                 const response = Buffer.from(localIP)
-                discoveryServer.send(response, rinfo.port, rinfo.address)
+                discoveryServer.send(response, rinfo.port, rinfo.address, (err) => {
+                    if (err) {
+                        logError('发送响应失败:', err)
+                    }
+                })
             }
         })
 
-        discoveryServer.bind(DISCOVERY_PORT, () => {
+        discoveryServer.bind(DISCOVERY_PORT, '0.0.0.0', () => {
             log('Mac服务器开始监听UDP端口:', DISCOVERY_PORT)
+            discoveryServer.setBroadcast(true)
         })
     } else {
         // Windows作为客户端，发送发现请求
-        discoveryServer.bind(() => {
+        discoveryServer.bind(0, '0.0.0.0', () => {
             log('Windows客户端启动UDP服务')
             discoveryServer.setBroadcast(true)
             
@@ -105,10 +122,27 @@ function setupDiscoveryService() {
                 
                 log('发送广播寻找服务器...')
                 const message = Buffer.from('FIND_CLIPBOARD_SERVER')
-                // 发送到局域网广播地址
-                discoveryServer.send(message, 0, message.length, DISCOVERY_PORT, '255.255.255.255')
-                // 同时也发送到本地回环地址
-                discoveryServer.send(message, 0, message.length, DISCOVERY_PORT, '127.0.0.1')
+                
+                // 获取所有网络接口的广播地址
+                const interfaces = os.networkInterfaces()
+                for (const interfaceName of Object.keys(interfaces)) {
+                    const addresses = interfaces[interfaceName]
+                    for (const addr of addresses) {
+                        if (addr.family === 'IPv4' && !addr.internal) {
+                            // 计算广播地址
+                            const broadcastAddr = addr.address.split('.')
+                            broadcastAddr[3] = '255'
+                            const broadcast = broadcastAddr.join('.')
+                            
+                            log('在接口', interfaceName, '发送广播到:', broadcast)
+                            discoveryServer.send(message, 0, message.length, DISCOVERY_PORT, broadcast, (err) => {
+                                if (err) {
+                                    logError('发送广播失败:', err)
+                                }
+                            })
+                        }
+                    }
+                }
             }
 
             // 立即开始寻找服务器
@@ -128,6 +162,9 @@ function setupDiscoveryService() {
             // 清理函数
             app.on('before-quit', () => {
                 clearInterval(searchInterval)
+                if (discoveryServer) {
+                    discoveryServer.close()
+                }
             })
         })
     }
