@@ -1,8 +1,9 @@
-const { app, BrowserWindow, clipboard, ipcMain, Tray, Menu, nativeImage } = require('electron')
+const { app, BrowserWindow, clipboard, ipcMain, Tray, Menu, nativeImage, dialog } = require('electron')
 const path = require('path')
 const WebSocket = require('ws')
 const os = require('os')
 const dgram = require('dgram')
+const fs = require('fs')
 
 // 设置控制台编码
 if (process.platform === 'win32') {
@@ -388,6 +389,11 @@ ipcMain.on('update-clipboard', (event, data) => {
         } else if (data.type === 'image') {
             const image = nativeImage.createFromDataURL(data.content)
             clipboard.writeImage(image)
+        } else if (data.type === 'files') {
+            // 在Windows上，将文件路径写入剪贴板
+            if (process.platform === 'win32') {
+                clipboard.writeBuffer('FileNameW', Buffer.from(data.content.map(f => f.name).join('\0') + '\0', 'ucs2'))
+            }
         }
         
         if (ws && ws.readyState === WebSocket.OPEN) {
@@ -395,6 +401,42 @@ ipcMain.on('update-clipboard', (event, data) => {
         }
     } catch (error) {
         logError('Error updating clipboard:', error)
+    }
+})
+
+// 处理文件保存请求
+ipcMain.on('save-received-files', async (event, files) => {
+    try {
+        // 创建接收文件的目录
+        const downloadPath = path.join(app.getPath('downloads'), 'ClipboardSync')
+        if (!fs.existsSync(downloadPath)) {
+            fs.mkdirSync(downloadPath, { recursive: true })
+        }
+
+        // 保存所有文件
+        const savedFiles = []
+        for (const file of files) {
+            const filePath = path.join(downloadPath, file.name)
+            const buffer = Buffer.from(file.data, 'base64')
+            await fs.promises.writeFile(filePath, buffer)
+            savedFiles.push(filePath)
+        }
+
+        // 将保存的文件路径写入剪贴板（用于Windows的粘贴操作）
+        if (process.platform === 'win32') {
+            clipboard.writeBuffer('FileNameW', Buffer.from(savedFiles.join('\0') + '\0', 'ucs2'))
+        }
+
+        event.reply('files-saved', {
+            success: true,
+            savePath: downloadPath
+        })
+    } catch (error) {
+        logError('保存文件失败:', error)
+        event.reply('files-saved', {
+            success: false,
+            error: error.message
+        })
     }
 })
 
