@@ -14,6 +14,7 @@
     "electron": "^34.0.0"
   },
   "dependencies": {
+    "iconv-lite": "^0.6.3",
     "ws": "^8.18.0"
   }
 }
