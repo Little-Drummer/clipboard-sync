@@ -295,25 +295,32 @@ function connectToServer(serverIP) {
             ws = new WebSocket(`ws://${serverIP}:${PORT}`)
             
             ws.on('open', () => {
-                log('WebSocket连接成功')
-                mainWindow.webContents.send('connection-status', `已连接到Mac服务器 (${serverIP})`)
+                log('WebSocket连接已建立，等待服务器确认...')
+                // 发送连接请求
                 ws.send(JSON.stringify({
-                    type: 'connection',
-                    content: 'Windows client connected'
+                    type: 'connection_confirm',
+                    content: 'windows_client'
                 }))
             })
             
             ws.on('message', (message) => {
                 try {
                     const data = JSON.parse(message)
-                    log('收到消息类型:', data.type)
-                    if (data.type === 'text') {
+                    log('收到消息:', data.type)
+                    
+                    if (data.type === 'connection_confirm') {
+                        log('收到服务器确认')
+                        mainWindow.webContents.send('connection-status', `已连接到Mac服务器 (${serverIP})`)
+                    } else if (data.type === 'text') {
                         clipboard.writeText(data.content)
+                        mainWindow.webContents.send('clipboard-updated', data)
                     } else if (data.type === 'image') {
                         const image = nativeImage.createFromDataURL(data.content)
                         clipboard.writeImage(image)
+                        mainWindow.webContents.send('clipboard-updated', data)
+                    } else if (data.type === 'files') {
+                        mainWindow.webContents.send('clipboard-updated', data)
                     }
-                    mainWindow.webContents.send('clipboard-updated', data)
                 } catch (error) {
                     logError('处理消息错误:', error)
                 }
@@ -335,6 +342,23 @@ function connectToServer(serverIP) {
                 logError('WebSocket错误:', error)
                 mainWindow.webContents.send('connection-status', '连接错误')
                 ws = null
+            })
+
+            // 添加心跳检测
+            const pingInterval = setInterval(() => {
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    ws.ping()
+                } else {
+                    clearInterval(pingInterval)
+                }
+            }, 30000)
+
+            ws.on('pong', () => {
+                log('收到服务器心跳响应')
+            })
+
+            ws.on('close', () => {
+                clearInterval(pingInterval)
             })
         } catch (error) {
             logError('创建WebSocket连接错误:', error)
@@ -386,18 +410,31 @@ function startWebSocketServer() {
             ws = socket
             const clientIP = req.socket.remoteAddress.replace('::ffff:', '')
             log('新的客户端连接:', clientIP)
-            mainWindow.webContents.send('connection-status', `已连接到Windows客户端 (${clientIP})`)
+            
+            // 发送连接确认
+            socket.send(JSON.stringify({
+                type: 'connection_confirm',
+                content: 'mac_server'
+            }))
             
             socket.on('message', (message) => {
                 try {
                     const data = JSON.parse(message)
-                    if (data.type === 'text') {
+                    log('收到消息:', data.type)
+                    
+                    if (data.type === 'connection_confirm') {
+                        log('收到Windows客户端确认')
+                        mainWindow.webContents.send('connection-status', `已连接到Windows客户端 (${clientIP})`)
+                    } else if (data.type === 'text') {
                         clipboard.writeText(data.content)
+                        mainWindow.webContents.send('clipboard-updated', data)
                     } else if (data.type === 'image') {
                         const image = nativeImage.createFromDataURL(data.content)
                         clipboard.writeImage(image)
+                        mainWindow.webContents.send('clipboard-updated', data)
+                    } else if (data.type === 'files') {
+                        mainWindow.webContents.send('clipboard-updated', data)
                     }
-                    mainWindow.webContents.send('clipboard-updated', data)
                 } catch (error) {
                     logError('处理消息错误:', error)
                 }
@@ -414,22 +451,29 @@ function startWebSocketServer() {
                 mainWindow.webContents.send('connection-status', '连接错误')
                 ws = null
             })
+
+            // 添加心跳检测
+            const pingInterval = setInterval(() => {
+                if (socket.readyState === WebSocket.OPEN) {
+                    socket.ping()
+                } else {
+                    clearInterval(pingInterval)
+                }
+            }, 30000)
+
+            socket.on('pong', () => {
+                log('收到客户端心跳响应')
+            })
+
+            socket.on('close', () => {
+                clearInterval(pingInterval)
+            })
         })
 
         wss.on('error', (error) => {
             logError('WebSocket服务器错误:', error)
             mainWindow.webContents.send('connection-status', '服务器错误')
             wss = null
-        })
-
-        // 添加关闭时的清理
-        app.on('before-quit', () => {
-            if (wss) {
-                wss.close(() => {
-                    log('WebSocket服务器已关闭')
-                    wss = null
-                })
-            }
         })
     } catch (error) {
         logError('创建WebSocket服务器失败:', error)
