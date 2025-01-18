@@ -617,16 +617,17 @@ ipcMain.on('update-clipboard', (event, data) => {
             clipboard.writeImage(image)
         } else if (data.type === 'files') {
             // 在Windows上，将文件路径写入剪贴板
-            if (process.platform === 'win32') {
-                clipboard.writeBuffer('FileNameW', Buffer.from(data.content.map(f => f.name).join('\0') + '\0', 'ucs2'))
+            if (process.platform === 'win32' && data.content[0].path) {
+                clipboard.writeBuffer('FileNameW', Buffer.from(data.content.map(f => f.path).join('\0') + '\0', 'ucs2'))
             }
         }
         
+        // 发送到另一端
         if (ws && ws.readyState === WebSocket.OPEN) {
             ws.send(JSON.stringify(data))
         }
     } catch (error) {
-        logError('Error updating clipboard:', error)
+        logError('更新剪贴板失败:', error)
     }
 })
 
@@ -642,6 +643,11 @@ ipcMain.on('save-received-files', async (event, files) => {
         // 保存所有文件
         const savedFiles = []
         for (const file of files) {
+            if (!file.name) {
+                logError('文件名称未定义:', file)
+                continue
+            }
+
             const filePath = path.join(downloadPath, file.name)
             const buffer = Buffer.from(file.data, 'base64')
             await fs.promises.writeFile(filePath, buffer)
@@ -649,7 +655,7 @@ ipcMain.on('save-received-files', async (event, files) => {
         }
 
         // 将保存的文件路径写入剪贴板（用于Windows的粘贴操作）
-        if (process.platform === 'win32') {
+        if (process.platform === 'win32' && savedFiles.length > 0) {
             clipboard.writeBuffer('FileNameW', Buffer.from(savedFiles.join('\0') + '\0', 'ucs2'))
         }
 
