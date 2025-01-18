@@ -295,10 +295,13 @@ function sendToRenderer(channel, message) {
 function connectToServer(serverIP) {
     log('尝试连接到服务器:', serverIP)
     
+    let wsLocal = null  // 使用局部变量来跟踪连接
+    let pingInterval = null
+    
     if (ws) {
         log('关闭现有连接')
         try {
-            ws.terminate() // 使用terminate而不是close，确保连接立即关闭
+            ws.terminate()
         } catch (error) {
             logError('关闭现有连接失败:', error)
         }
@@ -308,31 +311,41 @@ function connectToServer(serverIP) {
     const connectWithRetry = (retryCount = 0) => {
         try {
             log(`尝试第${retryCount + 1}次连接到 ${serverIP}...`)
-            ws = new WebSocket(`ws://${serverIP}:${PORT}`)
+            wsLocal = new WebSocket(`ws://${serverIP}:${PORT}`)
+            ws = wsLocal  // 设置全局变量
             
             // 设置超时
             const connectionTimeout = setTimeout(() => {
-                if (ws && ws.readyState !== WebSocket.OPEN) {
-                    log('连接超时，关闭连接')
-                    ws.terminate()
+                if (wsLocal) {
+                    try {
+                        if (wsLocal.readyState !== WebSocket.OPEN) {
+                            log('连接超时，关闭连接')
+                            wsLocal.terminate()
+                            ws = null
+                        }
+                    } catch (error) {
+                        logError('处理连接超时错误:', error)
+                    }
                 }
             }, 5000)
             
-            ws.on('open', () => {
-                clearTimeout(connectionTimeout)
-                log('WebSocket连接已建立，等待服务器确认...')
-                sendToRenderer('connection-status', '正在等待服务器确认...')
-                
-                // 发送连接请求
-                if (ws.readyState === WebSocket.OPEN) {
-                    ws.send(JSON.stringify({
+            wsLocal.on('open', () => {
+                try {
+                    clearTimeout(connectionTimeout)
+                    log('WebSocket连接已建立，等待服务器确认...')
+                    sendToRenderer('connection-status', '正在等待服务器确认...')
+                    
+                    // 发送连接请求
+                    wsLocal.send(JSON.stringify({
                         type: 'connection_confirm',
                         content: 'windows_client'
                     }))
+                } catch (error) {
+                    logError('处理open事件错误:', error)
                 }
             })
             
-            ws.on('message', (message) => {
+            wsLocal.on('message', (message) => {
                 try {
                     const data = JSON.parse(message)
                     log('收到消息:', data.type)
@@ -355,55 +368,82 @@ function connectToServer(serverIP) {
                 }
             })
             
-            ws.on('close', () => {
-                clearTimeout(connectionTimeout)
-                log('WebSocket连接关闭')
-                sendToRenderer('connection-status', '连接已断开')
-                ws = null
-                
-                // 如果不是主动关闭，尝试重连
-                if (retryCount < 5) {
-                    log(`将在5秒后进行第${retryCount + 1}次重连...`)
-                    setTimeout(() => connectWithRetry(retryCount + 1), 5000)
+            wsLocal.on('close', () => {
+                try {
+                    clearTimeout(connectionTimeout)
+                    if (pingInterval) {
+                        clearInterval(pingInterval)
+                        pingInterval = null
+                    }
+                    log('WebSocket连接关闭')
+                    sendToRenderer('connection-status', '连接已断开')
+                    ws = null
+                    
+                    // 如果不是主动关闭，尝试重连
+                    if (retryCount < 5) {
+                        log(`将在5秒后进行第${retryCount + 1}次重连...`)
+                        setTimeout(() => connectWithRetry(retryCount + 1), 5000)
+                    }
+                } catch (error) {
+                    logError('处理close事件错误:', error)
                 }
             })
 
-            ws.on('error', (error) => {
-                clearTimeout(connectionTimeout)
-                logError('WebSocket错误:', error)
-                sendToRenderer('connection-status', '连接错误')
-                ws = null
+            wsLocal.on('error', (error) => {
+                try {
+                    clearTimeout(connectionTimeout)
+                    if (pingInterval) {
+                        clearInterval(pingInterval)
+                        pingInterval = null
+                    }
+                    logError('WebSocket错误:', error)
+                    sendToRenderer('connection-status', '连接错误')
+                    ws = null
+                } catch (error) {
+                    logError('处理error事件错误:', error)
+                }
             })
 
             // 添加心跳检测
             let missedPings = 0
-            const pingInterval = setInterval(() => {
-                if (ws && ws.readyState === WebSocket.OPEN) {
-                    try {
-                        ws.ping()
+            pingInterval = setInterval(() => {
+                try {
+                    if (wsLocal && wsLocal.readyState === WebSocket.OPEN) {
+                        wsLocal.ping()
                         missedPings++
                         if (missedPings > 2) {
                             log('心跳超时，关闭连接')
                             clearInterval(pingInterval)
-                            ws.terminate()
+                            pingInterval = null
+                            wsLocal.terminate()
+                            ws = null
                         }
-                    } catch (error) {
-                        logError('发送心跳失败:', error)
+                    } else {
                         clearInterval(pingInterval)
-                        if (ws) ws.terminate()
+                        pingInterval = null
                     }
-                } else {
+                } catch (error) {
+                    logError('发送心跳失败:', error)
                     clearInterval(pingInterval)
+                    pingInterval = null
+                    if (wsLocal) {
+                        try {
+                            wsLocal.terminate()
+                        } catch (e) {
+                            logError('关闭连接失败:', e)
+                        }
+                    }
+                    ws = null
                 }
             }, 30000)
 
-            ws.on('pong', () => {
-                log('收到服务器心跳响应')
-                missedPings = 0
-            })
-
-            ws.on('close', () => {
-                clearInterval(pingInterval)
+            wsLocal.on('pong', () => {
+                try {
+                    log('收到服务器心跳响应')
+                    missedPings = 0
+                } catch (error) {
+                    logError('处理pong事件错误:', error)
+                }
             })
         } catch (error) {
             logError('创建WebSocket连接错误:', error)
