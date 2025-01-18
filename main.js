@@ -70,17 +70,29 @@ const DISCOVERY_PORT = 3001
 // 获取本机IP地址
 function getLocalIPAddress() {
     const interfaces = os.networkInterfaces()
+    let bestIP = '127.0.0.1'
+    let bestMetric = -1
+
     for (const interfaceName of Object.keys(interfaces)) {
         const addresses = interfaces[interfaceName]
         for (const addr of addresses) {
             if (addr.family === 'IPv4' && !addr.internal) {
-                log('找到本机IP:', addr.address)
-                return addr.address
+                // 优先选择非虚拟网卡的地址
+                const isVirtual = interfaceName.toLowerCase().includes('virtual') ||
+                                interfaceName.toLowerCase().includes('vbox') ||
+                                interfaceName.toLowerCase().includes('vmware')
+                const metric = isVirtual ? 0 : 1
+
+                if (metric > bestMetric) {
+                    bestMetric = metric
+                    bestIP = addr.address
+                }
             }
         }
     }
-    log('未找到有效IP，使用默认IP')
-    return '127.0.0.1'
+
+    log('选择的本机IP:', bestIP)
+    return bestIP
 }
 
 // 创建发现服务
@@ -92,6 +104,17 @@ function setupDiscoveryService() {
     discoveryServer.on('error', (err) => {
         logError('UDP服务器错误:', err)
         mainWindow.webContents.send('connection-status', '网络发现服务错误')
+        
+        // 尝试重新创建UDP服务
+        setTimeout(() => {
+            if (discoveryServer) {
+                discoveryServer.close(() => {
+                    setupDiscoveryService()
+                })
+            } else {
+                setupDiscoveryService()
+            }
+        }, 5000)
     })
 
     if (platform === 'darwin') {
@@ -113,6 +136,8 @@ function setupDiscoveryService() {
         discoveryServer.bind(DISCOVERY_PORT, '0.0.0.0', () => {
             log('Mac服务器开始监听UDP端口:', DISCOVERY_PORT)
             discoveryServer.setBroadcast(true)
+            // 确保WebSocket服务器已启动
+            setupWebSocket()
         })
     } else {
         // Windows作为客户端，发送发现请求
@@ -140,11 +165,15 @@ function setupDiscoveryService() {
                             broadcastAddr[3] = '255'
                             const broadcast = broadcastAddr.join('.')
                             
-                            log('在接口', interfaceName, '发送广播到:', broadcast)
-                            discoveryServer.send(message, 0, message.length, DISCOVERY_PORT, broadcast, (err) => {
-                                if (err) {
-                                    logError('发送广播失败:', err)
-                                }
+                            // 同时发送到广播地址和特定地址
+                            const targets = [broadcast, '255.255.255.255']
+                            targets.forEach(target => {
+                                log('在接口', interfaceName, '发送广播到:', target)
+                                discoveryServer.send(message, 0, message.length, DISCOVERY_PORT, target, (err) => {
+                                    if (err) {
+                                        logError('发送广播失败:', err)
+                                    }
+                                })
                             })
                         }
                     }
@@ -153,15 +182,20 @@ function setupDiscoveryService() {
 
             // 立即开始寻找服务器
             findServer()
-            // 每5秒尝试一次
-            const searchInterval = setInterval(findServer, 5000)
+            // 每3秒尝试一次
+            const searchInterval = setInterval(findServer, 3000)
 
             // 处理响应
             discoveryServer.on('message', (msg, rinfo) => {
                 const serverIP = msg.toString()
                 log('收到服务器响应:', serverIP, '来自:', rinfo.address)
                 if (!ws || ws.readyState !== WebSocket.OPEN) {
-                    connectToServer(serverIP)
+                    // 验证IP地址格式
+                    if (/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(serverIP)) {
+                        connectToServer(serverIP)
+                    } else {
+                        logError('收到无效的服务器IP地址:', serverIP)
+                    }
                 }
             })
 
@@ -255,64 +289,91 @@ function setupWebSocket() {
     if (platform === 'darwin') {
         // Mac作为服务器
         try {
-            const wss = new WebSocket.Server({ port: PORT }, () => {
-                log('WebSocket服务器启动成功，监听端口:', PORT)
-                mainWindow.webContents.send('connection-status', '等待Windows客户端连接...')
+            // 先检查端口是否被占用
+            const net = require('net')
+            const testServer = net.createServer()
+            
+            testServer.once('error', (err) => {
+                if (err.code === 'EADDRINUSE') {
+                    logError('WebSocket端口已被占用，尝试关闭现有连接')
+                    // 尝试连接占用的端口
+                    const client = new net.Socket()
+                    client.on('error', () => {
+                        // 无法连接，说明进程已死，可以重新绑定
+                        startWebSocketServer()
+                    })
+                    client.connect(PORT, '127.0.0.1', () => {
+                        // 端口确实被占用
+                        client.destroy()
+                        logError(`端口 ${PORT} 已被占用且正在使用`)
+                        mainWindow.webContents.send('connection-status', '服务器端口被占用')
+                    })
+                }
             })
             
-            wss.on('connection', (socket, req) => {
-                ws = socket
-                const clientIP = req.socket.remoteAddress.replace('::ffff:', '')
-                log('新的客户端连接:', clientIP)
-                mainWindow.webContents.send('connection-status', `已连接到Windows客户端 (${clientIP})`)
-                
-                socket.on('message', (message) => {
-                    try {
-                        const data = JSON.parse(message)
-                        if (data.type === 'text') {
-                            clipboard.writeText(data.content)
-                        } else if (data.type === 'image') {
-                            const image = nativeImage.createFromDataURL(data.content)
-                            clipboard.writeImage(image)
-                        }
-                        mainWindow.webContents.send('clipboard-updated', data)
-                    } catch (error) {
-                        logError('处理消息错误:', error)
-                    }
-                })
-                
-                socket.on('close', () => {
-                    log('客户端断开连接')
-                    mainWindow.webContents.send('connection-status', '连接已断开')
-                    ws = null
-                })
-
-                socket.on('error', (error) => {
-                    logError('WebSocket连接错误:', error)
-                    mainWindow.webContents.send('connection-status', '连接错误')
-                    ws = null
+            testServer.once('listening', () => {
+                testServer.close(() => {
+                    startWebSocketServer()
                 })
             })
-
-            wss.on('error', (error) => {
-                logError('WebSocket服务器错误:', error)
-                mainWindow.webContents.send('connection-status', '服务器错误')
-                // 尝试重新启动服务器
-                setTimeout(() => {
-                    log('尝试重新启动WebSocket服务器...')
-                    setupWebSocket()
-                }, 5000)
-            })
+            
+            testServer.listen(PORT)
         } catch (error) {
             logError('启动WebSocket服务器失败:', error)
             mainWindow.webContents.send('connection-status', '服务器启动失败')
-            // 尝试重新启动服务器
-            setTimeout(() => {
-                log('尝试重新启动WebSocket服务器...')
-                setupWebSocket()
-            }, 5000)
         }
     }
+}
+
+function startWebSocketServer() {
+    const wss = new WebSocket.Server({ port: PORT }, () => {
+        log('WebSocket服务器启动成功，监听端口:', PORT)
+        mainWindow.webContents.send('connection-status', '等待Windows客户端连接...')
+    })
+    
+    wss.on('connection', (socket, req) => {
+        ws = socket
+        const clientIP = req.socket.remoteAddress.replace('::ffff:', '')
+        log('新的客户端连接:', clientIP)
+        mainWindow.webContents.send('connection-status', `已连接到Windows客户端 (${clientIP})`)
+        
+        socket.on('message', (message) => {
+            try {
+                const data = JSON.parse(message)
+                if (data.type === 'text') {
+                    clipboard.writeText(data.content)
+                } else if (data.type === 'image') {
+                    const image = nativeImage.createFromDataURL(data.content)
+                    clipboard.writeImage(image)
+                }
+                mainWindow.webContents.send('clipboard-updated', data)
+            } catch (error) {
+                logError('处理消息错误:', error)
+            }
+        })
+        
+        socket.on('close', () => {
+            log('客户端断开连接')
+            mainWindow.webContents.send('connection-status', '连接已断开')
+            ws = null
+        })
+
+        socket.on('error', (error) => {
+            logError('WebSocket连接错误:', error)
+            mainWindow.webContents.send('connection-status', '连接错误')
+            ws = null
+        })
+    })
+
+    wss.on('error', (error) => {
+        logError('WebSocket服务器错误:', error)
+        mainWindow.webContents.send('connection-status', '服务器错误')
+        // 尝试重新启动服务器
+        setTimeout(() => {
+            log('尝试重新启动WebSocket服务器...')
+            setupWebSocket()
+        }, 5000)
+    })
 }
 
 // 创建托盘图标
