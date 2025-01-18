@@ -26,17 +26,27 @@ function log(message, ...args) {
     const timestamp = new Date().toLocaleTimeString()
     const logMessage = `[${timestamp}] ${message}`
     
-    // 在Windows上特殊处理args的显示
-    if (process.platform === 'win32' && args.length > 0) {
+    let finalMessage = logMessage
+    if (args.length > 0) {
         const argsStr = args.map(arg => {
             if (typeof arg === 'object') {
                 return JSON.stringify(arg, null, 2)
             }
             return String(arg)
         }).join(' ')
-        process.stdout.write(Buffer.from(logMessage + ' ' + argsStr + '\n', 'utf8'))
+        finalMessage += ' ' + argsStr
+    }
+
+    // 发送到调试窗口
+    if (debugWindow && !debugWindow.isDestroyed()) {
+        debugWindow.webContents.send('debug-log', finalMessage)
+    }
+
+    // 原有的控制台输出
+    if (process.platform === 'win32') {
+        process.stdout.write(Buffer.from(finalMessage + '\n', 'utf8'))
     } else {
-        console.log(logMessage, ...args)
+        console.log(finalMessage)
     }
 }
 
@@ -44,7 +54,8 @@ function logError(message, ...args) {
     const timestamp = new Date().toLocaleTimeString()
     const errorMessage = `[${timestamp}] 错误: ${message}`
     
-    if (process.platform === 'win32' && args.length > 0) {
+    let finalMessage = errorMessage
+    if (args.length > 0) {
         const argsStr = args.map(arg => {
             if (arg instanceof Error) {
                 return arg.message
@@ -54,9 +65,19 @@ function logError(message, ...args) {
             }
             return String(arg)
         }).join(' ')
-        process.stderr.write(Buffer.from(errorMessage + ' ' + argsStr + '\n', 'utf8'))
+        finalMessage += ' ' + argsStr
+    }
+
+    // 发送到调试窗口
+    if (debugWindow && !debugWindow.isDestroyed()) {
+        debugWindow.webContents.send('debug-log', finalMessage)
+    }
+
+    // 原有的错误输出
+    if (process.platform === 'win32') {
+        process.stderr.write(Buffer.from(finalMessage + '\n', 'utf8'))
     } else {
-        console.error(errorMessage, ...args)
+        console.error(finalMessage)
     }
 }
 
@@ -513,9 +534,35 @@ const createWindow = () => {
     })
 }
 
+// 添加调试窗口相关变量
+let debugWindow = null
+
+// 创建调试窗口
+function createDebugWindow() {
+    debugWindow = new BrowserWindow({
+        width: 800,
+        height: 600,
+        title: '调试日志',
+        webPreferences: {
+            nodeIntegration: true,
+            contextIsolation: false
+        }
+    })
+
+    // 加载调试页面
+    debugWindow.loadFile('debug.html')
+
+    debugWindow.on('closed', () => {
+        debugWindow = null
+    })
+}
+
 app.whenReady().then(() => {
     createWindow()
     createTray()
+    if (process.platform === 'win32') {
+        createDebugWindow()
+    }
     setupWebSocket()
     setupDiscoveryService()
 

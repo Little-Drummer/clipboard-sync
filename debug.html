@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>调试日志</title>
+    <meta charset="UTF-8">
+    <style>
+        body {
+            margin: 0;
+            padding: 10px;
+            background: #1e1e1e;
+            color: #ffffff;
+            font-family: Consolas, monospace;
+            font-size: 12px;
+            overflow-y: scroll;
+        }
+        #logContainer {
+            white-space: pre-wrap;
+            word-wrap: break-word;
+        }
+        .log-entry {
+            margin: 2px 0;
+            padding: 2px 0;
+            border-bottom: 1px solid #333;
+        }
+        .error {
+            color: #ff6b6b;
+        }
+    </style>
+</head>
+<body>
+    <div id="logContainer"></div>
+    <script>
+        const { ipcRenderer } = require('electron')
+        const logContainer = document.getElementById('logContainer')
+        
+        ipcRenderer.on('debug-log', (event, message) => {
+            const entry = document.createElement('div')
+            entry.className = 'log-entry' + (message.includes('错误:') ? ' error' : '')
+            entry.textContent = message
+            logContainer.appendChild(entry)
+            
+            // 自动滚动到底部
+            entry.scrollIntoView({ behavior: 'smooth', block: 'end' })
+            
+            // 保持日志数量在合理范围内
+            while (logContainer.children.length > 1000) {
+                logContainer.removeChild(logContainer.firstChild)
+            }
+        })
+    </script>
+</body>
+</html> 
