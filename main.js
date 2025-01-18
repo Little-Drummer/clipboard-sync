@@ -282,42 +282,22 @@ function connectToServer(serverIP) {
     connectWithRetry()
 }
 
-// 创建WebSocket服务器或客户端
+// 添加全局变量来跟踪WebSocket服务器状态
+let wss = null
+
 function setupWebSocket() {
     const platform = os.platform()
     
     if (platform === 'darwin') {
         // Mac作为服务器
         try {
-            // 先检查端口是否被占用
-            const net = require('net')
-            const testServer = net.createServer()
-            
-            testServer.once('error', (err) => {
-                if (err.code === 'EADDRINUSE') {
-                    logError('WebSocket端口已被占用，尝试关闭现有连接')
-                    // 尝试连接占用的端口
-                    const client = new net.Socket()
-                    client.on('error', () => {
-                        // 无法连接，说明进程已死，可以重新绑定
-                        startWebSocketServer()
-                    })
-                    client.connect(PORT, '127.0.0.1', () => {
-                        // 端口确实被占用
-                        client.destroy()
-                        logError(`端口 ${PORT} 已被占用且正在使用`)
-                        mainWindow.webContents.send('connection-status', '服务器端口被占用')
-                    })
-                }
-            })
-            
-            testServer.once('listening', () => {
-                testServer.close(() => {
-                    startWebSocketServer()
-                })
-            })
-            
-            testServer.listen(PORT)
+            // 如果已经有WebSocket服务器在运行，直接返回
+            if (wss) {
+                log('WebSocket服务器已经在运行')
+                return
+            }
+
+            startWebSocketServer()
         } catch (error) {
             logError('启动WebSocket服务器失败:', error)
             mainWindow.webContents.send('connection-status', '服务器启动失败')
@@ -326,54 +306,66 @@ function setupWebSocket() {
 }
 
 function startWebSocketServer() {
-    const wss = new WebSocket.Server({ port: PORT }, () => {
-        log('WebSocket服务器启动成功，监听端口:', PORT)
-        mainWindow.webContents.send('connection-status', '等待Windows客户端连接...')
-    })
-    
-    wss.on('connection', (socket, req) => {
-        ws = socket
-        const clientIP = req.socket.remoteAddress.replace('::ffff:', '')
-        log('新的客户端连接:', clientIP)
-        mainWindow.webContents.send('connection-status', `已连接到Windows客户端 (${clientIP})`)
+    try {
+        wss = new WebSocket.Server({ port: PORT }, () => {
+            log('WebSocket服务器启动成功，监听端口:', PORT)
+            mainWindow.webContents.send('connection-status', '等待Windows客户端连接...')
+        })
         
-        socket.on('message', (message) => {
-            try {
-                const data = JSON.parse(message)
-                if (data.type === 'text') {
-                    clipboard.writeText(data.content)
-                } else if (data.type === 'image') {
-                    const image = nativeImage.createFromDataURL(data.content)
-                    clipboard.writeImage(image)
+        wss.on('connection', (socket, req) => {
+            ws = socket
+            const clientIP = req.socket.remoteAddress.replace('::ffff:', '')
+            log('新的客户端连接:', clientIP)
+            mainWindow.webContents.send('connection-status', `已连接到Windows客户端 (${clientIP})`)
+            
+            socket.on('message', (message) => {
+                try {
+                    const data = JSON.parse(message)
+                    if (data.type === 'text') {
+                        clipboard.writeText(data.content)
+                    } else if (data.type === 'image') {
+                        const image = nativeImage.createFromDataURL(data.content)
+                        clipboard.writeImage(image)
+                    }
+                    mainWindow.webContents.send('clipboard-updated', data)
+                } catch (error) {
+                    logError('处理消息错误:', error)
                 }
-                mainWindow.webContents.send('clipboard-updated', data)
-            } catch (error) {
-                logError('处理消息错误:', error)
+            })
+            
+            socket.on('close', () => {
+                log('客户端断开连接')
+                mainWindow.webContents.send('connection-status', '连接已断开')
+                ws = null
+            })
+
+            socket.on('error', (error) => {
+                logError('WebSocket连接错误:', error)
+                mainWindow.webContents.send('connection-status', '连接错误')
+                ws = null
+            })
+        })
+
+        wss.on('error', (error) => {
+            logError('WebSocket服务器错误:', error)
+            mainWindow.webContents.send('connection-status', '服务器错误')
+            wss = null
+        })
+
+        // 添加关闭时的清理
+        app.on('before-quit', () => {
+            if (wss) {
+                wss.close(() => {
+                    log('WebSocket服务器已关闭')
+                    wss = null
+                })
             }
         })
-        
-        socket.on('close', () => {
-            log('客户端断开连接')
-            mainWindow.webContents.send('connection-status', '连接已断开')
-            ws = null
-        })
-
-        socket.on('error', (error) => {
-            logError('WebSocket连接错误:', error)
-            mainWindow.webContents.send('connection-status', '连接错误')
-            ws = null
-        })
-    })
-
-    wss.on('error', (error) => {
-        logError('WebSocket服务器错误:', error)
-        mainWindow.webContents.send('connection-status', '服务器错误')
-        // 尝试重新启动服务器
-        setTimeout(() => {
-            log('尝试重新启动WebSocket服务器...')
-            setupWebSocket()
-        }, 5000)
-    })
+    } catch (error) {
+        logError('创建WebSocket服务器失败:', error)
+        mainWindow.webContents.send('connection-status', '服务器启动失败')
+        wss = null
+    }
 }
 
 // 创建托盘图标
