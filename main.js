@@ -140,72 +140,121 @@ function setupDiscoveryService() {
             setupWebSocket()
         })
     } else {
-        // Windows作为客户端，发送发现请求
-        discoveryServer.bind(0, '0.0.0.0', () => {
-            log('Windows客户端启动UDP服务')
+        // Windows客户端部分
+        log('正在初始化Windows客户端...')
+        
+        // 先尝试关闭之前的服务器（如果存在）
+        if (discoveryServer) {
+            try {
+                discoveryServer.close()
+            } catch (error) {
+                logError('关闭旧UDP服务器失败:', error)
+            }
+        }
+
+        // 创建新的UDP服务器
+        discoveryServer = dgram.createSocket({
+            type: 'udp4',
+            reuseAddr: true
+        })
+
+        discoveryServer.on('listening', () => {
+            log('Windows UDP客户端已启动，端口:', discoveryServer.address().port)
             discoveryServer.setBroadcast(true)
             
-            function findServer() {
-                if (ws && ws.readyState === WebSocket.OPEN) {
-                    log('已连接到服务器，跳过搜索')
-                    return
-                }
-                
-                log('发送广播寻找服务器...')
-                const message = Buffer.from('FIND_CLIPBOARD_SERVER')
-                
-                // 获取所有网络接口的广播地址
-                const interfaces = os.networkInterfaces()
-                for (const interfaceName of Object.keys(interfaces)) {
-                    const addresses = interfaces[interfaceName]
-                    for (const addr of addresses) {
-                        if (addr.family === 'IPv4' && !addr.internal) {
-                            // 计算广播地址
-                            const broadcastAddr = addr.address.split('.')
-                            broadcastAddr[3] = '255'
-                            const broadcast = broadcastAddr.join('.')
-                            
-                            // 同时发送到广播地址和特定地址
-                            const targets = [broadcast, '255.255.255.255']
-                            targets.forEach(target => {
-                                log('在接口', interfaceName, '发送广播到:', target)
-                                discoveryServer.send(message, 0, message.length, DISCOVERY_PORT, target, (err) => {
-                                    if (err) {
-                                        logError('发送广播失败:', err)
-                                    }
-                                })
-                            })
-                        }
+            // 立即开始寻找服务器
+            findServer()
+        })
+
+        discoveryServer.on('error', (error) => {
+            logError('Windows UDP客户端错误:', error)
+            mainWindow.webContents.send('connection-status', 'UDP客户端错误')
+        })
+
+        discoveryServer.bind(0, '0.0.0.0', () => {
+            log('Windows UDP客户端绑定成功')
+        })
+
+        function findServer() {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                log('已连接到服务器，跳过搜索')
+                return
+            }
+            
+            log('开始搜索Mac服务器...')
+            const message = Buffer.from('FIND_CLIPBOARD_SERVER')
+            
+            // 获取所有网络接口
+            const interfaces = os.networkInterfaces()
+            let broadcastsSent = 0
+            
+            for (const interfaceName of Object.keys(interfaces)) {
+                const addresses = interfaces[interfaceName]
+                for (const addr of addresses) {
+                    if (addr.family === 'IPv4' && !addr.internal) {
+                        // 计算广播地址
+                        const broadcastAddr = addr.address.split('.')
+                        broadcastAddr[3] = '255'
+                        const broadcast = broadcastAddr.join('.')
+                        
+                        log(`正在通过接口 ${interfaceName} (${addr.address}) 发送广播到 ${broadcast}`)
+                        
+                        // 发送到特定广播地址
+                        discoveryServer.send(message, 0, message.length, DISCOVERY_PORT, broadcast, (err) => {
+                            if (err) {
+                                logError(`发送广播到 ${broadcast} 失败:`, err)
+                            } else {
+                                broadcastsSent++
+                                log(`成功发送广播到 ${broadcast}`)
+                            }
+                        })
+                        
+                        // 发送到全局广播地址
+                        discoveryServer.send(message, 0, message.length, DISCOVERY_PORT, '255.255.255.255', (err) => {
+                            if (err) {
+                                logError('发送全局广播失败:', err)
+                            } else {
+                                broadcastsSent++
+                                log('成功发送全局广播')
+                            }
+                        })
                     }
                 }
             }
+            
+            if (broadcastsSent === 0) {
+                logError('没有找到可用的网络接口发送广播')
+                mainWindow.webContents.send('connection-status', '未找到可用网络接口')
+            }
+        }
 
-            // 立即开始寻找服务器
-            findServer()
-            // 每3秒尝试一次
-            const searchInterval = setInterval(findServer, 3000)
-
-            // 处理响应
-            discoveryServer.on('message', (msg, rinfo) => {
-                const serverIP = msg.toString()
-                log('收到服务器响应:', serverIP, '来自:', rinfo.address)
-                if (!ws || ws.readyState !== WebSocket.OPEN) {
-                    // 验证IP地址格式
-                    if (/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(serverIP)) {
-                        connectToServer(serverIP)
-                    } else {
-                        logError('收到无效的服务器IP地址:', serverIP)
-                    }
+        // 每3秒尝试一次
+        const searchInterval = setInterval(findServer, 3000)
+        
+        // 处理响应
+        discoveryServer.on('message', (msg, rinfo) => {
+            const serverIP = msg.toString()
+            log('收到来自', rinfo.address, '的响应:', serverIP)
+            
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                if (/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(serverIP)) {
+                    log('验证IP地址成功，尝试连接到:', serverIP)
+                    connectToServer(serverIP)
+                } else {
+                    logError('收到无效的服务器IP地址:', serverIP)
                 }
-            })
+            }
+        })
 
-            // 清理函数
-            app.on('before-quit', () => {
-                clearInterval(searchInterval)
-                if (discoveryServer) {
-                    discoveryServer.close()
-                }
-            })
+        // 清理函数
+        app.on('before-quit', () => {
+            log('正在清理UDP客户端...')
+            clearInterval(searchInterval)
+            if (discoveryServer) {
+                discoveryServer.close(() => {
+                    log('UDP客户端已关闭')
+                })
+            }
         })
     }
 }
