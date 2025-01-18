@@ -539,10 +539,20 @@ let debugWindow = null
 
 // 创建调试窗口
 function createDebugWindow() {
+    // 如果已经存在调试窗口，先关闭它
+    if (debugWindow) {
+        try {
+            debugWindow.close()
+        } catch (error) {
+            // 忽略关闭错误
+        }
+    }
+
     debugWindow = new BrowserWindow({
         width: 800,
         height: 600,
         title: '调试日志',
+        show: false,  // 先不显示
         webPreferences: {
             nodeIntegration: true,
             contextIsolation: false
@@ -552,17 +562,36 @@ function createDebugWindow() {
     // 加载调试页面
     debugWindow.loadFile('debug.html')
 
+    // 等待页面加载完成后再显示
+    debugWindow.webContents.on('did-finish-load', () => {
+        debugWindow.show()
+        log('调试窗口已启动')  // 添加启动确认日志
+    })
+
     debugWindow.on('closed', () => {
         debugWindow = null
+        // 如果调试窗口被关闭，尝试重新创建
+        setTimeout(createDebugWindow, 1000)
     })
 }
 
 app.whenReady().then(() => {
+    // 首先创建主窗口
     createWindow()
+    
+    // 然后创建托盘图标
     createTray()
+    
+    // 在Windows平台上，延迟创建调试窗口
     if (process.platform === 'win32') {
-        createDebugWindow()
+        setTimeout(() => {
+            createDebugWindow()
+            // 立即发送一条测试日志
+            log('调试系统初始化完成')
+        }, 1000)
     }
+    
+    // 最后设置网络服务
     setupWebSocket()
     setupDiscoveryService()
 
@@ -571,6 +600,11 @@ app.whenReady().then(() => {
             createWindow()
         }
     })
+})
+
+// 添加一个IPC处理器来响应调试窗口的就绪事件
+ipcMain.on('debug-window-ready', () => {
+    log('调试窗口已就绪')
 })
 
 // 处理从渲染进程发来的剪贴板更新请求

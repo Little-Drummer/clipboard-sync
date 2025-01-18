@@ -25,13 +25,33 @@
         .error {
             color: #ff6b6b;
         }
+        .status {
+            position: fixed;
+            top: 0;
+            right: 0;
+            padding: 5px;
+            background: #333;
+            font-size: 10px;
+        }
     </style>
 </head>
 <body>
+    <div class="status">调试窗口</div>
     <div id="logContainer"></div>
     <script>
         const { ipcRenderer } = require('electron')
         const logContainer = document.getElementById('logContainer')
+        
+        // 页面加载完成后通知主进程
+        window.addEventListener('load', () => {
+            ipcRenderer.send('debug-window-ready')
+            
+            // 添加一个初始日志
+            const entry = document.createElement('div')
+            entry.className = 'log-entry'
+            entry.textContent = `[${new Date().toLocaleTimeString()}] 调试窗口已启动`
+            logContainer.appendChild(entry)
+        })
         
         ipcRenderer.on('debug-log', (event, message) => {
             const entry = document.createElement('div')
