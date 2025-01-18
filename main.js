@@ -280,27 +280,56 @@ function setupDiscoveryService() {
     }
 }
 
-// 连接到服务器
+// 添加安全的消息发送函数
+function sendToRenderer(channel, message) {
+    try {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send(channel, message)
+        }
+    } catch (error) {
+        logError('发送消息到渲染进程失败:', error)
+    }
+}
+
+// 修改connectToServer函数
 function connectToServer(serverIP) {
     log('尝试连接到服务器:', serverIP)
     
     if (ws) {
         log('关闭现有连接')
-        ws.close()
+        try {
+            ws.terminate() // 使用terminate而不是close，确保连接立即关闭
+        } catch (error) {
+            logError('关闭现有连接失败:', error)
+        }
         ws = null
     }
 
     const connectWithRetry = (retryCount = 0) => {
         try {
+            log(`尝试第${retryCount + 1}次连接到 ${serverIP}...`)
             ws = new WebSocket(`ws://${serverIP}:${PORT}`)
             
+            // 设置超时
+            const connectionTimeout = setTimeout(() => {
+                if (ws && ws.readyState !== WebSocket.OPEN) {
+                    log('连接超时，关闭连接')
+                    ws.terminate()
+                }
+            }, 5000)
+            
             ws.on('open', () => {
+                clearTimeout(connectionTimeout)
                 log('WebSocket连接已建立，等待服务器确认...')
+                sendToRenderer('connection-status', '正在等待服务器确认...')
+                
                 // 发送连接请求
-                ws.send(JSON.stringify({
-                    type: 'connection_confirm',
-                    content: 'windows_client'
-                }))
+                if (ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({
+                        type: 'connection_confirm',
+                        content: 'windows_client'
+                    }))
+                }
             })
             
             ws.on('message', (message) => {
@@ -310,16 +339,16 @@ function connectToServer(serverIP) {
                     
                     if (data.type === 'connection_confirm') {
                         log('收到服务器确认')
-                        mainWindow.webContents.send('connection-status', `已连接到Mac服务器 (${serverIP})`)
+                        sendToRenderer('connection-status', `已连接到Mac服务器 (${serverIP})`)
                     } else if (data.type === 'text') {
                         clipboard.writeText(data.content)
-                        mainWindow.webContents.send('clipboard-updated', data)
+                        sendToRenderer('clipboard-updated', data)
                     } else if (data.type === 'image') {
                         const image = nativeImage.createFromDataURL(data.content)
                         clipboard.writeImage(image)
-                        mainWindow.webContents.send('clipboard-updated', data)
+                        sendToRenderer('clipboard-updated', data)
                     } else if (data.type === 'files') {
-                        mainWindow.webContents.send('clipboard-updated', data)
+                        sendToRenderer('clipboard-updated', data)
                     }
                 } catch (error) {
                     logError('处理消息错误:', error)
@@ -327,8 +356,9 @@ function connectToServer(serverIP) {
             })
             
             ws.on('close', () => {
+                clearTimeout(connectionTimeout)
                 log('WebSocket连接关闭')
-                mainWindow.webContents.send('connection-status', '连接已断开')
+                sendToRenderer('connection-status', '连接已断开')
                 ws = null
                 
                 // 如果不是主动关闭，尝试重连
@@ -339,15 +369,29 @@ function connectToServer(serverIP) {
             })
 
             ws.on('error', (error) => {
+                clearTimeout(connectionTimeout)
                 logError('WebSocket错误:', error)
-                mainWindow.webContents.send('connection-status', '连接错误')
+                sendToRenderer('connection-status', '连接错误')
                 ws = null
             })
 
             // 添加心跳检测
+            let missedPings = 0
             const pingInterval = setInterval(() => {
                 if (ws && ws.readyState === WebSocket.OPEN) {
-                    ws.ping()
+                    try {
+                        ws.ping()
+                        missedPings++
+                        if (missedPings > 2) {
+                            log('心跳超时，关闭连接')
+                            clearInterval(pingInterval)
+                            ws.terminate()
+                        }
+                    } catch (error) {
+                        logError('发送心跳失败:', error)
+                        clearInterval(pingInterval)
+                        if (ws) ws.terminate()
+                    }
                 } else {
                     clearInterval(pingInterval)
                 }
@@ -355,6 +399,7 @@ function connectToServer(serverIP) {
 
             ws.on('pong', () => {
                 log('收到服务器心跳响应')
+                missedPings = 0
             })
 
             ws.on('close', () => {
@@ -362,7 +407,7 @@ function connectToServer(serverIP) {
             })
         } catch (error) {
             logError('创建WebSocket连接错误:', error)
-            mainWindow.webContents.send('connection-status', '创建连接失败')
+            sendToRenderer('connection-status', '创建连接失败')
             ws = null
             
             // 如果失败，尝试重连
@@ -403,7 +448,7 @@ function startWebSocketServer() {
     try {
         wss = new WebSocket.Server({ port: PORT }, () => {
             log('WebSocket服务器启动成功，监听端口:', PORT)
-            mainWindow.webContents.send('connection-status', '等待Windows客户端连接...')
+            sendToRenderer('connection-status', '等待Windows客户端连接...')
         })
         
         wss.on('connection', (socket, req) => {
@@ -412,10 +457,12 @@ function startWebSocketServer() {
             log('新的客户端连接:', clientIP)
             
             // 发送连接确认
-            socket.send(JSON.stringify({
-                type: 'connection_confirm',
-                content: 'mac_server'
-            }))
+            if (socket.readyState === WebSocket.OPEN) {
+                socket.send(JSON.stringify({
+                    type: 'connection_confirm',
+                    content: 'mac_server'
+                }))
+            }
             
             socket.on('message', (message) => {
                 try {
@@ -424,16 +471,16 @@ function startWebSocketServer() {
                     
                     if (data.type === 'connection_confirm') {
                         log('收到Windows客户端确认')
-                        mainWindow.webContents.send('connection-status', `已连接到Windows客户端 (${clientIP})`)
+                        sendToRenderer('connection-status', `已连接到Windows客户端 (${clientIP})`)
                     } else if (data.type === 'text') {
                         clipboard.writeText(data.content)
-                        mainWindow.webContents.send('clipboard-updated', data)
+                        sendToRenderer('clipboard-updated', data)
                     } else if (data.type === 'image') {
                         const image = nativeImage.createFromDataURL(data.content)
                         clipboard.writeImage(image)
-                        mainWindow.webContents.send('clipboard-updated', data)
+                        sendToRenderer('clipboard-updated', data)
                     } else if (data.type === 'files') {
-                        mainWindow.webContents.send('clipboard-updated', data)
+                        sendToRenderer('clipboard-updated', data)
                     }
                 } catch (error) {
                     logError('处理消息错误:', error)
@@ -442,20 +489,33 @@ function startWebSocketServer() {
             
             socket.on('close', () => {
                 log('客户端断开连接')
-                mainWindow.webContents.send('connection-status', '连接已断开')
+                sendToRenderer('connection-status', '连接已断开')
                 ws = null
             })
 
             socket.on('error', (error) => {
                 logError('WebSocket连接错误:', error)
-                mainWindow.webContents.send('connection-status', '连接错误')
+                sendToRenderer('connection-status', '连接错误')
                 ws = null
             })
 
             // 添加心跳检测
+            let missedPings = 0
             const pingInterval = setInterval(() => {
                 if (socket.readyState === WebSocket.OPEN) {
-                    socket.ping()
+                    try {
+                        socket.ping()
+                        missedPings++
+                        if (missedPings > 2) {
+                            log('心跳超时，关闭连接')
+                            clearInterval(pingInterval)
+                            socket.terminate()
+                        }
+                    } catch (error) {
+                        logError('发送心跳失败:', error)
+                        clearInterval(pingInterval)
+                        if (socket) socket.terminate()
+                    }
                 } else {
                     clearInterval(pingInterval)
                 }
@@ -463,6 +523,7 @@ function startWebSocketServer() {
 
             socket.on('pong', () => {
                 log('收到客户端心跳响应')
+                missedPings = 0
             })
 
             socket.on('close', () => {
@@ -472,12 +533,12 @@ function startWebSocketServer() {
 
         wss.on('error', (error) => {
             logError('WebSocket服务器错误:', error)
-            mainWindow.webContents.send('connection-status', '服务器错误')
+            sendToRenderer('connection-status', '服务器错误')
             wss = null
         })
     } catch (error) {
         logError('创建WebSocket服务器失败:', error)
-        mainWindow.webContents.send('connection-status', '服务器启动失败')
+        sendToRenderer('connection-status', '服务器启动失败')
         wss = null
     }
 }
@@ -623,21 +684,22 @@ app.whenReady().then(() => {
     // 首先创建主窗口
     createWindow()
     
-    // 然后创建托盘图标
-    createTray()
-    
-    // 在Windows平台上，延迟创建调试窗口
-    if (process.platform === 'win32') {
-        setTimeout(() => {
+    // 等待主窗口创建完成
+    setTimeout(() => {
+        // 然后创建托盘图标
+        createTray()
+        
+        // 在Windows平台上，创建调试窗口
+        if (process.platform === 'win32') {
             createDebugWindow()
             // 立即发送一条测试日志
             log('调试系统初始化完成')
-        }, 1000)
-    }
-    
-    // 最后设置网络服务
-    setupWebSocket()
-    setupDiscoveryService()
+        }
+        
+        // 最后设置网络服务
+        setupWebSocket()
+        setupDiscoveryService()
+    }, 1000)
 
     app.on('activate', () => {
         if (BrowserWindow.getAllWindows().length === 0) {
