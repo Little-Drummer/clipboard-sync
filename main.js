@@ -554,18 +554,32 @@ function createTray() {
             { 
                 label: '连接状态',
                 enabled: false,
-                label: ws && ws.readyState === WebSocket.OPEN 
+                label: (ws && ws.readyState === WebSocket.OPEN) 
                     ? '已连接' 
-                    : '未连接'
+                    : ((ws && ws.readyState === WebSocket.CONNECTING)
+                        ? '正在连接...'
+                        : '未连接')
             },
             { type: 'separator' },
             { 
                 label: '重新连接',
+                enabled: !ws || ws.readyState !== WebSocket.CONNECTING,
                 click: () => {
                     if (process.platform === 'win32') {
                         // Windows端重新搜索服务器
-                        const message = Buffer.from('FIND_CLIPBOARD_SERVER')
-                        discoveryServer.send(message, 0, message.length, DISCOVERY_PORT, '255.255.255.255')
+                        if (discoveryServer) {
+                            const message = Buffer.from('FIND_CLIPBOARD_SERVER')
+                            discoveryServer.send(message, 0, message.length, DISCOVERY_PORT, '255.255.255.255', (err) => {
+                                if (err) {
+                                    logError('发送广播失败:', err)
+                                } else {
+                                    log('已发送重新连接请求')
+                                }
+                            })
+                        } else {
+                            log('重新初始化发现服务')
+                            setupDiscoveryService()
+                        }
                     }
                 }
             },
