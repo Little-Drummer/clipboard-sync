@@ -549,78 +549,155 @@ function createTray() {
     const iconPath = process.platform === 'win32' ? 'windows-icon.ico' : 'icon.png'
     tray = new Tray(path.join(__dirname, iconPath))
     
+    // 获取连接状态
+    function getConnectionStatus() {
+        try {
+            if (!ws) return '未连接'
+            switch (ws.readyState) {
+                case WebSocket.CONNECTING:
+                    return '正在连接...'
+                case WebSocket.OPEN:
+                    return '已连接'
+                case WebSocket.CLOSING:
+                    return '正在断开...'
+                case WebSocket.CLOSED:
+                    return '未连接'
+                default:
+                    return '未连接'
+            }
+        } catch (error) {
+            logError('获取连接状态失败:', error)
+            return '未连接'
+        }
+    }
+    
+    // 检查是否可以重新连接
+    function canReconnect() {
+        try {
+            return !ws || ws.readyState === WebSocket.CLOSED
+        } catch (error) {
+            logError('检查重连状态失败:', error)
+            return true
+        }
+    }
+    
     function getContextMenu() {
-        return Menu.buildFromTemplate([
-            { 
-                label: '连接状态',
-                enabled: false,
-                label: (ws && ws.readyState === WebSocket.OPEN) 
-                    ? '已连接' 
-                    : ((ws && ws.readyState === WebSocket.CONNECTING)
-                        ? '正在连接...'
-                        : '未连接')
-            },
-            { type: 'separator' },
-            { 
-                label: '重新连接',
-                enabled: !ws || ws.readyState !== WebSocket.CONNECTING,
-                click: () => {
-                    if (process.platform === 'win32') {
-                        // Windows端重新搜索服务器
-                        if (discoveryServer) {
-                            const message = Buffer.from('FIND_CLIPBOARD_SERVER')
-                            discoveryServer.send(message, 0, message.length, DISCOVERY_PORT, '255.255.255.255', (err) => {
-                                if (err) {
-                                    logError('发送广播失败:', err)
+        try {
+            return Menu.buildFromTemplate([
+                { 
+                    label: '连接状态',
+                    enabled: false,
+                    label: getConnectionStatus()
+                },
+                { type: 'separator' },
+                { 
+                    label: '重新连接',
+                    enabled: canReconnect(),
+                    click: () => {
+                        if (process.platform === 'win32') {
+                            try {
+                                // Windows端重新搜索服务器
+                                if (discoveryServer) {
+                                    const message = Buffer.from('FIND_CLIPBOARD_SERVER')
+                                    discoveryServer.send(message, 0, message.length, DISCOVERY_PORT, '255.255.255.255', (err) => {
+                                        if (err) {
+                                            logError('发送广播失败:', err)
+                                        } else {
+                                            log('已发送重新连接请求')
+                                        }
+                                    })
                                 } else {
-                                    log('已发送重新连接请求')
+                                    log('重新初始化发现服务')
+                                    setupDiscoveryService()
                                 }
-                            })
-                        } else {
-                            log('重新初始化发现服务')
-                            setupDiscoveryService()
+                            } catch (error) {
+                                logError('重新连接失败:', error)
+                            }
+                        }
+                    }
+                },
+                { 
+                    label: '显示主窗口', 
+                    click: () => {
+                        try {
+                            if (mainWindow === null) {
+                                createWindow()
+                            } else {
+                                mainWindow.show()
+                            }
+                        } catch (error) {
+                            logError('显示主窗口失败:', error)
+                        }
+                    }
+                },
+                { type: 'separator' },
+                { 
+                    label: '退出', 
+                    click: () => {
+                        try {
+                            app.isQuitting = true
+                            app.quit()
+                        } catch (error) {
+                            logError('退出程序失败:', error)
+                            process.exit(1)
                         }
                     }
                 }
-            },
-            { 
-                label: '显示主窗口', 
-                click: () => {
-                    if (mainWindow === null) {
-                        createWindow()
-                    } else {
-                        mainWindow.show()
-                    }
+            ])
+        } catch (error) {
+            logError('创建托盘菜单失败:', error)
+            return Menu.buildFromTemplate([
+                { 
+                    label: '错误',
+                    enabled: false
+                },
+                { type: 'separator' },
+                { 
+                    label: '退出', 
+                    click: () => process.exit(1)
                 }
-            },
-            { type: 'separator' },
-            { 
-                label: '退出', 
-                click: () => {
-                    app.isQuitting = true
-                    app.quit()
-                }
-            }
-        ])
+            ])
+        }
     }
     
     // 设置初始菜单
-    tray.setContextMenu(getContextMenu())
-    
-    // 定期更新菜单以反映最新状态
-    setInterval(() => {
+    try {
         tray.setContextMenu(getContextMenu())
-    }, 1000)
-    
-    tray.setToolTip('剪贴板同步工具')
-    
-    tray.on('click', () => {
-        if (mainWindow === null) {
-            createWindow()
-        } else {
-            mainWindow.show()
-        }
-    })
+        
+        // 定期更新菜单以反映最新状态
+        const menuUpdateInterval = setInterval(() => {
+            if (tray && !tray.isDestroyed()) {
+                try {
+                    tray.setContextMenu(getContextMenu())
+                } catch (error) {
+                    logError('更新托盘菜单失败:', error)
+                }
+            } else {
+                clearInterval(menuUpdateInterval)
+            }
+        }, 1000)
+        
+        // 清理函数
+        app.on('before-quit', () => {
+            clearInterval(menuUpdateInterval)
+        })
+        
+        tray.setToolTip('剪贴板同步工具')
+        
+        tray.on('click', () => {
+            try {
+                if (mainWindow === null) {
+                    createWindow()
+                } else {
+                    mainWindow.show()
+                }
+            } catch (error) {
+                logError('处理托盘点击事件失败:', error)
+            }
+        })
+    } catch (error) {
+        logError('初始化托盘失败:', error)
+    }
 }
 
 const createWindow = () => {
