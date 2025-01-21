@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>调试日志</title>
+    <meta charset="UTF-8">
+    <style>
+        body {
+            margin: 0;
+            padding: 10px;
+            background: #1e1e1e;
+            color: #ffffff;
+            font-family: Consolas, monospace;
+            font-size: 12px;
+            overflow-y: scroll;
+        }
+        #logContainer {
+            white-space: pre-wrap;
+            word-wrap: break-word;
+        }
+        .log-entry {
+            margin: 2px 0;
+            padding: 2px 0;
+            border-bottom: 1px solid #333;
+        }
+        .error {
+            color: #ff6b6b;
+        }
+        .status {
+            position: fixed;
+            top: 0;
+            right: 0;
+            padding: 5px;
+            background: #333;
+            font-size: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="status">调试窗口</div>
+    <div id="logContainer"></div>
+    <script>
+        const { ipcRenderer } = require('electron')
+        const logContainer = document.getElementById('logContainer')
+        
+        // 页面加载完成后通知主进程
+        window.addEventListener('load', () => {
+            ipcRenderer.send('debug-window-ready')
+            
+            // 添加一个初始日志
+            const entry = document.createElement('div')
+            entry.className = 'log-entry'
+            entry.textContent = `[${new Date().toLocaleTimeString()}] 调试窗口已启动`
+            logContainer.appendChild(entry)
+        })
+        
+        ipcRenderer.on('debug-log', (event, message) => {
+            const entry = document.createElement('div')
+            entry.className = 'log-entry' + (message.includes('错误:') ? ' error' : '')
+            entry.textContent = message
+            logContainer.appendChild(entry)
+            
+            // 自动滚动到底部
+            entry.scrollIntoView({ behavior: 'smooth', block: 'end' })
+            
+            // 保持日志数量在合理范围内
+            while (logContainer.children.length > 1000) {
+                logContainer.removeChild(logContainer.firstChild)
+            }
+        })
+    </script>
+</body>
+</html> 
