@@ -345,28 +345,7 @@ function connectToServer(serverIP) {
                 }
             })
             
-            wsLocal.on('message', (message) => {
-                try {
-                    const data = JSON.parse(message)
-                    log('收到消息:', data.type)
-                    
-                    if (data.type === 'connection_confirm') {
-                        log('收到服务器确认')
-                        sendToRenderer('connection-status', `已连接到Mac服务器 (${serverIP})`)
-                    } else if (data.type === 'text') {
-                        clipboard.writeText(data.content)
-                        sendToRenderer('clipboard-updated', data)
-                    } else if (data.type === 'image') {
-                        const image = nativeImage.createFromDataURL(data.content)
-                        clipboard.writeImage(image)
-                        sendToRenderer('clipboard-updated', data)
-                    } else if (data.type === 'files') {
-                        sendToRenderer('clipboard-updated', data)
-                    }
-                } catch (error) {
-                    logError('处理消息错误:', error)
-                }
-            })
+            wsLocal.on('message', (message) => handleWebSocketMessage(wsLocal, message))
             
             wsLocal.on('close', () => {
                 try {
@@ -484,6 +463,34 @@ function setupWebSocket() {
     }
 }
 
+function handleWebSocketMessage(socket, message) {
+    try {
+        const data = JSON.parse(message)
+        log('收到消息:', data.type)
+        
+        if (data.type === 'connection_confirm') {
+            const clientIP = socket._socket.remoteAddress.replace('::ffff:', '')
+            log('收到客户端确认')
+            sendToRenderer('connection-status', `已连接到客户端 (${clientIP})`)
+        } else if (data.type === 'text' && data.content) {
+            clipboard.writeText(data.content)
+            sendToRenderer('clipboard-updated', data)
+        } else if (data.type === 'image' && data.content) {
+            try {
+                const image = nativeImage.createFromDataURL(data.content)
+                if (!image.isEmpty()) {
+                    clipboard.writeImage(image)
+                    sendToRenderer('clipboard-updated', data)
+                }
+            } catch (error) {
+                logError('处理接收的图片失败:', error)
+            }
+        }
+    } catch (error) {
+        logError('处理WebSocket消息失败:', error)
+    }
+}
+
 function startWebSocketServer() {
     try {
         wss = new WebSocket.Server({ port: PORT }, () => {
@@ -504,28 +511,7 @@ function startWebSocketServer() {
                 }))
             }
             
-            socket.on('message', (message) => {
-                try {
-                    const data = JSON.parse(message)
-                    log('收到消息:', data.type)
-                    
-                    if (data.type === 'connection_confirm') {
-                        log('收到Windows客户端确认')
-                        sendToRenderer('connection-status', `已连接到Windows客户端 (${clientIP})`)
-                    } else if (data.type === 'text') {
-                        clipboard.writeText(data.content)
-                        sendToRenderer('clipboard-updated', data)
-                    } else if (data.type === 'image') {
-                        const image = nativeImage.createFromDataURL(data.content)
-                        clipboard.writeImage(image)
-                        sendToRenderer('clipboard-updated', data)
-                    } else if (data.type === 'files') {
-                        sendToRenderer('clipboard-updated', data)
-                    }
-                } catch (error) {
-                    logError('处理消息错误:', error)
-                }
-            })
+            socket.on('message', (message) => handleWebSocketMessage(socket, message))
             
             socket.on('close', () => {
                 log('客户端断开连接')
@@ -847,16 +833,23 @@ ipcMain.on('debug-window-ready', () => {
 // 处理从渲染进程发来的剪贴板更新请求
 ipcMain.on('update-clipboard', (event, data) => {
     try {
-        if (data.type === 'text') {
-            clipboard.writeText(data.content)
-        } else if (data.type === 'image') {
-            const image = nativeImage.createFromDataURL(data.content)
-            clipboard.writeImage(image)
-        }
-        
-        // 发送到另一端
+        // 先发送到另一端，确保消息能及时传递
         if (ws && ws.readyState === WebSocket.OPEN) {
             ws.send(JSON.stringify(data))
+        }
+
+        // 然后更新本地剪贴板
+        if (data.type === 'text' && data.content) {
+            clipboard.writeText(data.content)
+        } else if (data.type === 'image' && data.content) {
+            try {
+                const image = nativeImage.createFromDataURL(data.content)
+                if (!image.isEmpty()) {
+                    clipboard.writeImage(image)
+                }
+            } catch (error) {
+                logError('处理图片数据失败:', error)
+            }
         }
     } catch (error) {
         logError('更新剪贴板失败:', error)
