@@ -280,8 +280,9 @@ function sendToRenderer(channel, message) {
 function connectToServer(serverIP) {
     log('尝试连接到服务器:', serverIP)
     
-    let wsLocal = null  // 使用局部变量来跟踪连接
+    let wsLocal = null
     let pingInterval = null
+    let reconnectTimeout = null
     
     if (ws) {
         log('关闭现有连接')
@@ -293,26 +294,32 @@ function connectToServer(serverIP) {
         ws = null
     }
 
-    const connectWithRetry = (retryCount = 0) => {
+    const connectWithRetry = (retryCount = 0, delay = 5000) => {
         try {
             log(`尝试第${retryCount + 1}次连接到 ${serverIP}...`)
             wsLocal = new WebSocket(`ws://${serverIP}:${PORT}`)
-            ws = wsLocal  // 设置全局变量
+            ws = wsLocal
             
-            // 设置超时
+            // 设置连接超时
             const connectionTimeout = setTimeout(() => {
-                if (wsLocal) {
+                if (wsLocal && wsLocal.readyState !== WebSocket.OPEN) {
+                    log('连接超时，准备重试')
                     try {
-                        if (wsLocal.readyState !== WebSocket.OPEN) {
-                            log('连接超时，关闭连接')
-                            wsLocal.terminate()
-                            ws = null
-                        }
+                        wsLocal.terminate()
                     } catch (error) {
-                        logError('处理连接超时错误:', error)
+                        logError('关闭超时连接失败:', error)
+                    }
+                    ws = null
+                    
+                    // 使用指数退避策略
+                    const nextDelay = Math.min(delay * 1.5, 30000) // 最大延迟30秒
+                    if (retryCount < 10) { // 增加最大重试次数
+                        reconnectTimeout = setTimeout(() => {
+                            connectWithRetry(retryCount + 1, nextDelay)
+                        }, nextDelay)
                     }
                 }
-            }, 5000)
+            }, 10000) // 增加超时时间到10秒
             
             wsLocal.on('open', () => {
                 try {
@@ -320,7 +327,6 @@ function connectToServer(serverIP) {
                     log('WebSocket连接已建立，等待服务器确认...')
                     sendToRenderer('connection-status', '正在等待服务器确认...')
                     
-                    // 发送连接请求
                     wsLocal.send(JSON.stringify({
                         type: 'connection_confirm',
                         content: 'windows_client'
@@ -340,13 +346,14 @@ function connectToServer(serverIP) {
                         pingInterval = null
                     }
                     log('WebSocket连接关闭')
-                    sendToRenderer('connection-status', '连接已断开')
+                    sendToRenderer('connection-status', '连接已断开，正在重连...')
                     ws = null
                     
-                    // 如果不是主动关闭，尝试重连
-                    if (retryCount < 5) {
-                        log(`将在5秒后进行第${retryCount + 1}次重连...`)
-                        setTimeout(() => connectWithRetry(retryCount + 1), 5000)
+                    // 立即尝试重连
+                    if (retryCount < 10) {
+                        reconnectTimeout = setTimeout(() => {
+                            connectWithRetry(retryCount + 1, delay)
+                        }, delay)
                     }
                 } catch (error) {
                     logError('处理close事件错误:', error)
@@ -361,14 +368,14 @@ function connectToServer(serverIP) {
                         pingInterval = null
                     }
                     logError('WebSocket错误:', error)
-                    sendToRenderer('connection-status', '连接错误')
+                    sendToRenderer('connection-status', '连接错误，正在重连...')
                     ws = null
                 } catch (error) {
                     logError('处理error事件错误:', error)
                 }
             })
 
-            // 添加心跳检测
+            // 增加更频繁的心跳检测
             let missedPings = 0
             pingInterval = setInterval(() => {
                 try {
@@ -376,11 +383,13 @@ function connectToServer(serverIP) {
                         wsLocal.ping()
                         missedPings++
                         if (missedPings > 2) {
-                            log('心跳超时，关闭连接')
+                            log('心跳超时，正在重新连接...')
                             clearInterval(pingInterval)
                             pingInterval = null
                             wsLocal.terminate()
                             ws = null
+                            // 立即开始重连
+                            connectWithRetry(0, 1000)
                         }
                     } else {
                         clearInterval(pingInterval)
@@ -398,8 +407,10 @@ function connectToServer(serverIP) {
                         }
                     }
                     ws = null
+                    // 立即开始重连
+                    connectWithRetry(0, 1000)
                 }
-            }, 30000)
+            }, 15000) // 减少心跳间隔到15秒
 
             wsLocal.on('pong', () => {
                 try {
@@ -411,15 +422,22 @@ function connectToServer(serverIP) {
             })
         } catch (error) {
             logError('创建WebSocket连接错误:', error)
-            sendToRenderer('connection-status', '创建连接失败')
+            sendToRenderer('connection-status', '创建连接失败，正在重试...')
             ws = null
             
-            // 如果失败，尝试重连
-            if (retryCount < 5) {
-                log(`将在5秒后进行第${retryCount + 1}次重连...`)
-                setTimeout(() => connectWithRetry(retryCount + 1), 5000)
+            // 发生错误时也尝试重连
+            if (retryCount < 10) {
+                reconnectTimeout = setTimeout(() => {
+                    connectWithRetry(retryCount + 1, delay)
+                }, delay)
             }
         }
+    }
+
+    // 清理之前的重连定时器
+    if (reconnectTimeout) {
+        clearTimeout(reconnectTimeout)
+        reconnectTimeout = null
     }
 
     connectWithRetry()
@@ -488,7 +506,6 @@ function startWebSocketServer() {
             const clientIP = req.socket.remoteAddress.replace('::ffff:', '')
             log('新的客户端连接:', clientIP)
             
-            // 发送连接确认
             if (socket.readyState === WebSocket.OPEN) {
                 socket.send(JSON.stringify({
                     type: 'connection_confirm',
@@ -500,7 +517,7 @@ function startWebSocketServer() {
             
             socket.on('close', () => {
                 log('客户端断开连接')
-                sendToRenderer('connection-status', '连接已断开')
+                sendToRenderer('connection-status', '等待客户端重新连接...')
                 ws = null
             })
 
@@ -510,7 +527,7 @@ function startWebSocketServer() {
                 ws = null
             })
 
-            // 添加心跳检测
+            // 服务器端也增加更频繁的心跳检测
             let missedPings = 0
             const pingInterval = setInterval(() => {
                 if (socket.readyState === WebSocket.OPEN) {
@@ -530,7 +547,7 @@ function startWebSocketServer() {
                 } else {
                     clearInterval(pingInterval)
                 }
-            }, 30000)
+            }, 15000)
 
             socket.on('pong', () => {
                 log('收到客户端心跳响应')
@@ -544,13 +561,31 @@ function startWebSocketServer() {
 
         wss.on('error', (error) => {
             logError('WebSocket服务器错误:', error)
-            sendToRenderer('connection-status', '服务器错误')
+            sendToRenderer('connection-status', '服务器错误，正在重启...')
+            
+            // 服务器发生错误时，尝试重启
+            if (wss) {
+                try {
+                    wss.close(() => {
+                        setTimeout(() => {
+                            startWebSocketServer()
+                        }, 5000)
+                    })
+                } catch (e) {
+                    logError('关闭WebSocket服务器失败:', e)
+                }
+            }
             wss = null
         })
     } catch (error) {
         logError('创建WebSocket服务器失败:', error)
-        sendToRenderer('connection-status', '服务器启动失败')
+        sendToRenderer('connection-status', '服务器启动失败，正在重试...')
         wss = null
+        
+        // 创建失败时，延迟后重试
+        setTimeout(() => {
+            startWebSocketServer()
+        }, 5000)
     }
 }
 
