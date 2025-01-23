@@ -5,16 +5,43 @@
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "build": "electron-builder"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "devDependencies": {
-    "electron": "^34.0.0"
+    "electron": "^34.0.1",
+    "electron-builder": "^25.1.8",
+    "electron-packager": "^17.1.2"
   },
   "dependencies": {
     "iconv-lite": "^0.6.3",
     "ws": "^8.18.0"
+  },
+  "build": {
+    "productName": "Clipboard Sync",
+    "appId": "cn.yjxw.clipboardSync",
+    "asar": true,
+    "target": "dmg",
+    "icon": "icon-mac.png",
+    "mac": {
+      "icon": "icon-mac.png",
+      "target": "dmg"
+    },
+    "win": {
+      "icon": "icon.png",
+      "target": "nsis"
+    },
+    "files": [
+      "**/*",
+      "!node_modules",
+      "!dist",
+      "!build"
+    ],
+    "directories": {
+      "output": "dist"
+    }
   }
 }
