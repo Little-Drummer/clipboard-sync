@@ -551,16 +551,19 @@ function handleWebSocketMessage(socket, message) {
         if (data.type === 'connection_confirm') {
             const clientIP = socket._socket.remoteAddress.replace('::ffff:', '')
             log('收到客户端确认')
-            sendToRenderer('connection-status', `已连接到客户端 (${clientIP})`)
+            // 确保这是当前活动的连接
+            if (ws === socket && socket.readyState === WebSocket.OPEN) {
+                sendToRenderer('connection-status', `已连接到客户端 (${clientIP})`)
+            }
         } else if (data.type === 'text' && data.content) {
-            lastText = data.content  // 更新lastText以避免重复发送
+            lastText = data.content
             clipboard.writeText(data.content)
             sendToRenderer('clipboard-updated', data)
         } else if (data.type === 'image' && data.content) {
             try {
                 const image = nativeImage.createFromDataURL(data.content)
                 if (!image.isEmpty()) {
-                    lastImage = image  // 更新lastImage以避免重复发送
+                    lastImage = image
                     clipboard.writeImage(image)
                     sendToRenderer('clipboard-updated', data)
                 }
@@ -585,27 +588,17 @@ function startWebSocketServer() {
             const clientIP = req.socket.remoteAddress.replace('::ffff:', '')
             log('新的客户端连接:', clientIP)
             
+            // 发送连接确认
             if (socket.readyState === WebSocket.OPEN) {
                 socket.send(JSON.stringify({
                     type: 'connection_confirm',
                     content: 'mac_server'
                 }))
+                sendToRenderer('connection-status', `已连接到客户端 (${clientIP})`)
             }
             
             socket.on('message', (message) => handleWebSocketMessage(socket, message))
             
-            socket.on('close', () => {
-                log('客户端断开连接')
-                sendToRenderer('connection-status', '等待客户端重新连接...')
-                ws = null
-            })
-
-            socket.on('error', (error) => {
-                logError('WebSocket连接错误:', error)
-                sendToRenderer('connection-status', '连接错误')
-                ws = null
-            })
-
             // 服务器端也增加更频繁的心跳检测
             let missedPings = 0
             const pingInterval = setInterval(() => {
@@ -617,32 +610,72 @@ function startWebSocketServer() {
                             log('心跳超时，关闭连接')
                             clearInterval(pingInterval)
                             socket.terminate()
+                            ws = null
+                            sendToRenderer('connection-status', '等待客户端重新连接...')
                         }
                     } catch (error) {
                         logError('发送心跳失败:', error)
                         clearInterval(pingInterval)
-                        if (socket) socket.terminate()
+                        if (socket) {
+                            socket.terminate()
+                            ws = null
+                            sendToRenderer('connection-status', '等待客户端重新连接...')
+                        }
                     }
                 } else {
                     clearInterval(pingInterval)
+                    if (ws === socket) {
+                        ws = null
+                        sendToRenderer('connection-status', '等待客户端重新连接...')
+                    }
                 }
             }, 15000)
 
             socket.on('pong', () => {
                 log('收到客户端心跳响应')
                 missedPings = 0
+                // 确保连接状态正确显示
+                if (ws === socket && socket.readyState === WebSocket.OPEN) {
+                    sendToRenderer('connection-status', `已连接到客户端 (${clientIP})`)
+                }
             })
 
-            socket.on('close', () => {
-                clearInterval(pingInterval)
+            socket.on('error', (error) => {
+                logError('WebSocket连接错误:', error)
+                if (ws === socket) {
+                    ws = null
+                    sendToRenderer('connection-status', '连接错误')
+                }
             })
+
+            // 只注册一次close事件
+            socket.on('close', () => {
+                log('客户端断开连接')
+                clearInterval(pingInterval)
+                if (ws === socket) {
+                    ws = null
+                    sendToRenderer('connection-status', '等待客户端重新连接...')
+                }
+            })
+
+            // 定期检查连接状态
+            const statusCheckInterval = setInterval(() => {
+                if (socket.readyState === WebSocket.OPEN && ws === socket) {
+                    sendToRenderer('connection-status', `已连接到客户端 (${clientIP})`)
+                } else if (ws === socket) {
+                    ws = null
+                    sendToRenderer('connection-status', '等待客户端重新连接...')
+                }
+                if (socket.readyState === WebSocket.CLOSED) {
+                    clearInterval(statusCheckInterval)
+                }
+            }, 5000)
         })
 
         wss.on('error', (error) => {
             logError('WebSocket服务器错误:', error)
             sendToRenderer('connection-status', '服务器错误，正在重启...')
             
-            // 服务器发生错误时，尝试重启
             if (wss) {
                 try {
                     wss.close(() => {
@@ -661,7 +694,6 @@ function startWebSocketServer() {
         sendToRenderer('connection-status', '服务器启动失败，正在重试...')
         wss = null
         
-        // 创建失败时，延迟后重试
         setTimeout(() => {
             startWebSocketServer()
         }, 5000)
