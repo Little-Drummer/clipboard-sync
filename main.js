@@ -1,10 +1,9 @@
-const { app, BrowserWindow, clipboard, ipcMain, Tray, Menu, nativeImage, dialog } = require('electron')
+const { app, BrowserWindow, clipboard, ipcMain, Tray, Menu, nativeImage } = require('electron')
 const path = require('path')
 const WebSocket = require('ws')
 const os = require('os')
 const dgram = require('dgram')
-const fs = require('fs')
-
+require('fs');
 // 设置控制台编码
 if (process.platform === 'win32') {
     process.env.LANG = 'zh_CN.UTF-8'
@@ -24,9 +23,7 @@ if (process.platform === 'win32') {
 // 创建日志函数
 function log(message, ...args) {
     const timestamp = new Date().toLocaleTimeString()
-    const logMessage = `[${timestamp}] ${message}`
-    
-    let finalMessage = logMessage
+    let finalMessage = `[${timestamp}] ${message}`
     if (args.length > 0) {
         const argsStr = args.map(arg => {
             if (typeof arg === 'object') {
@@ -47,9 +44,7 @@ function log(message, ...args) {
 
 function logError(message, ...args) {
     const timestamp = new Date().toLocaleTimeString()
-    const errorMessage = `[${timestamp}] 错误: ${message}`
-    
-    let finalMessage = errorMessage
+    let finalMessage = `[${timestamp}] 错误: ${message}`
     if (args.length > 0) {
         const argsStr = args.map(arg => {
             if (arg instanceof Error) {
@@ -600,8 +595,7 @@ function createTray() {
     function getContextMenu() {
         try {
             return Menu.buildFromTemplate([
-                { 
-                    label: '连接状态',
+                {
                     enabled: false,
                     label: getConnectionStatus()
                 },
@@ -718,6 +712,7 @@ function createTray() {
 
 const createWindow = () => {
     if (mainWindow !== null) {
+        mainWindow.show()  // 如果窗口已存在，直接显示
         return
     }
 
@@ -760,9 +755,13 @@ app.whenReady().then(() => {
         setupDiscoveryService()
     }, 1000)
 
+    // 修改 activate 事件处理
     app.on('activate', () => {
-        if (BrowserWindow.getAllWindows().length === 0) {
+        // 当点击dock图标时，如果窗口存在则显示，不存在则创建
+        if (mainWindow === null) {
             createWindow()
+        } else {
+            mainWindow.show()
         }
     })
 })
