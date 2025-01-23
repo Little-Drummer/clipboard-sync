@@ -466,6 +466,83 @@ function setupWebSocket() {
     }
 }
 
+// 添加剪贴板监控相关变量
+let lastText = ''
+let lastImage = null
+let isProcessing = false
+
+// 添加图片比较函数
+function compareImages(img1, img2) {
+    if (!img1 || !img2) return false
+    if (img1.isEmpty() && img2.isEmpty()) return true
+    if (img1.isEmpty() !== img2.isEmpty()) return false
+    return img1.toDataURL() === img2.toDataURL()
+}
+
+// 添加剪贴板检测函数
+async function checkClipboard() {
+    if (isProcessing) return
+    isProcessing = true
+
+    try {
+        // 检查文本变化
+        const newText = clipboard.readText()
+        if (newText !== lastText && newText) {  // 只在有文本时发送
+            lastText = newText
+            log('检测到新的剪贴板文本:', newText)
+            
+            // 发送到连接的客户端
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({
+                    type: 'text',
+                    content: newText
+                }))
+            }
+            
+            // 如果窗口存在，更新UI
+            if (mainWindow && !mainWindow.isDestroyed()) {
+                mainWindow.webContents.send('clipboard-updated', {
+                    type: 'text',
+                    content: newText
+                })
+            }
+        }
+
+        // 检查图片变化
+        const newImage = clipboard.readImage()
+        if (!compareImages(newImage, lastImage)) {
+            if (!newImage.isEmpty()) {
+                lastImage = newImage
+                const dataUrl = newImage.toDataURL()
+                log('检测到新的剪贴板图片')
+                
+                if (dataUrl && dataUrl.startsWith('data:image/')) {
+                    // 发送到连接的客户端
+                    if (ws && ws.readyState === WebSocket.OPEN) {
+                        ws.send(JSON.stringify({
+                            type: 'image',
+                            content: dataUrl
+                        }))
+                    }
+                    
+                    // 如果窗口存在，更新UI
+                    if (mainWindow && !mainWindow.isDestroyed()) {
+                        mainWindow.webContents.send('clipboard-updated', {
+                            type: 'image',
+                            content: dataUrl
+                        })
+                    }
+                }
+            }
+        }
+    } catch (error) {
+        logError('检查剪贴板错误:', error)
+    } finally {
+        isProcessing = false
+    }
+}
+
+// 修改handleWebSocketMessage函数
 function handleWebSocketMessage(socket, message) {
     try {
         const data = JSON.parse(message)
@@ -476,12 +553,14 @@ function handleWebSocketMessage(socket, message) {
             log('收到客户端确认')
             sendToRenderer('connection-status', `已连接到客户端 (${clientIP})`)
         } else if (data.type === 'text' && data.content) {
+            lastText = data.content  // 更新lastText以避免重复发送
             clipboard.writeText(data.content)
             sendToRenderer('clipboard-updated', data)
         } else if (data.type === 'image' && data.content) {
             try {
                 const image = nativeImage.createFromDataURL(data.content)
                 if (!image.isEmpty()) {
+                    lastImage = image  // 更新lastImage以避免重复发送
                     clipboard.writeImage(image)
                     sendToRenderer('clipboard-updated', data)
                 }
@@ -780,6 +859,9 @@ app.whenReady().then(() => {
     // 首先创建主窗口
     createWindow()
     
+    // 启动剪贴板监控
+    const clipboardCheckInterval = setInterval(checkClipboard, 500)
+    
     // 等待主窗口创建完成
     setTimeout(() => {
         // 然后创建托盘图标
@@ -792,24 +874,38 @@ app.whenReady().then(() => {
 
     // 修改 activate 事件处理
     app.on('activate', () => {
-        // 当点击dock图标时，如果窗口存在则显示，不存在则创建
         if (mainWindow === null) {
             createWindow()
         } else {
             mainWindow.show()
         }
     })
+    
+    // 添加清理
+    app.on('before-quit', () => {
+        clearInterval(clipboardCheckInterval)
+    })
 })
 
-// 处理从渲染进程发来的剪贴板更新请求
+// 修改ipcMain事件处理
 ipcMain.on('update-clipboard', (event, data) => {
     try {
-        // 先发送到另一端，确保消息能及时传递
+        // 更新lastText或lastImage以避免重复发送
+        if (data.type === 'text') {
+            lastText = data.content
+        } else if (data.type === 'image') {
+            const image = nativeImage.createFromDataURL(data.content)
+            if (!image.isEmpty()) {
+                lastImage = image
+            }
+        }
+        
+        // 发送到另一端
         if (ws && ws.readyState === WebSocket.OPEN) {
             ws.send(JSON.stringify(data))
         }
 
-        // 然后更新本地剪贴板
+        // 更新本地剪贴板
         if (data.type === 'text' && data.content) {
             clipboard.writeText(data.content)
         } else if (data.type === 'image' && data.content) {
